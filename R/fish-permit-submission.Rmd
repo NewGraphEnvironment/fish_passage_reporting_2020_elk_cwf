@@ -1,0 +1,139 @@
+---
+title: 
+output:
+  bookdown::word_document2:
+    reference_docx: C:/Users/allan/OneDrive/New_Graph/Current/Code/R/Templates/RMDTemplates/R/word_template_landscape.docx
+    bibliography: references.bib
+    toc: no
+    fig_caption: yes
+  bookdown::html_document2:
+    number_sections: no
+    self_contained: yes
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=T, comment=NA, echo =FALSE, message=FALSE, warning=FALSE}
+library(DBI)
+library(tidyverse)
+library(sf)
+library(RPostgres)
+library(data.table)
+library(xlsx)
+library(flextable)
+library("plotKML")
+
+
+source('packages.R')
+source('private_info.R')
+source('functions.R')
+
+
+#Enter the values for you database connection
+# * Connect to the database
+conn <- DBI::dbConnect(
+  RPostgres::Postgres(),
+  dbname = dbname_wsl,
+  host = host_wsl,
+  port = port_wsl,
+  user = user_wsl,
+  password = password_wsl
+)
+
+knitr::opts_chunk$set(echo=FALSE, comment=NA, message=FALSE, warning=FALSE, fig.align="center", fig.width = 5.118, fig.height = 3.409)
+options(knitr.table.format = "html")
+
+
+```
+
+
+We need the watershed codes for the submission
+
+```{r}
+
+sites <-  readxl::excel_sheets(path = paste0(dirname(getwd()), "/data/habitat_confirmations.xls")) %>% 
+  purrr::set_names() %>%
+  purrr::map(read_excel,
+             path = paste0(dirname(getwd()), "/data/habitat_confirmations.xls"),
+             .name_repair = janitor::make_clean_names) %>%
+  purrr::set_names(janitor::make_clean_names(names(.))) %>%
+  purrr::map(at_trim_xlsheet2) %>% #moved to functions from https://github.com/NewGraphEnvironment/altools to reduce dependencies
+  purrr::map(plyr::colwise(type.convert)) %>% 
+  pluck('step_1_ref_and_loc_info') %>% 
+  tidyr::separate(alias_local_name, into = c('site', 'location'), remove = F) %>% 
+  filter(!is.na(site))
+
+DBI::dbGetQuery(conn,
+           "SELECT column_name,data_type
+           FROM information_schema.columns
+           WHERE table_name='crossings'")
+
+##need to get the stream_crossing_ids for my pscis crossings - there are 3 that are missing that should get matched.
+ids <-  sites %>%
+  pull(site) %>%
+  unique() %>%
+  as_vector() %>%
+  na.omit()
+
+
+##see the names of the columns in the crossings table
+
+
+sql <- glue::glue_sql(
+  "
+                                Select stream_crossing_id, linear_feature_id
+                                FROM bcfishpass.crossings b
+                                WHERE b.stream_crossing_id IN
+                                ({ids*})
+                                ",
+  .con = conn
+)
+query <- DBI::dbSendQuery(conn, sql)
+info <- DBI::dbFetch(query)
+dbClearResult(query)
+
+
+##find all the watershed codes from the ELKR
+wsc <- dbGetQuery(conn, "SELECT DISTINCT ON (stream_crossing_id)
+    a.stream_crossing_id, 
+    a.linear_feature_id,
+    b.watershed_code_50k,
+    substring(b.watershed_code_50k from 1 for 3)
+      ||'-'||substring(b.watershed_code_50k from 4 for 6)
+      ||'-'||substring(b.watershed_code_50k from 10 for 5)
+      ||'-'||substring(b.watershed_code_50k from 15 for 5)
+      ||'-'||substring(b.watershed_code_50k from 20 for 4)
+      ||'-'||substring(b.watershed_code_50k from 24 for 4)
+      ||'-'||substring(b.watershed_code_50k from 28 for 3)
+      ||'-'||substring(b.watershed_code_50k from 31 for 3)
+      ||'-'||substring(b.watershed_code_50k from 34 for 3)
+      ||'-'||substring(b.watershed_code_50k from 37 for 3)
+      ||'-'||substring(b.watershed_code_50k from 40 for 3)
+      ||'-'||substring(b.watershed_code_50k from 43 for 3)as watershed_code_50k_parsed,
+    b.blue_line_key_20k,
+    b.watershed_key_20k,
+    b.blue_line_key_50k,
+    b.watershed_key_50k,
+    b.match_type
+FROM bcfishpass.crossings a
+LEFT OUTER JOIN whse_basemapping.fwa_streams_20k_50k b
+ON a.linear_feature_id = b.linear_feature_id_20k
+WHERE a.watershed_group_code = 'ELKR'
+ORDER BY a.stream_crossing_id, b.match_type;")
+
+ids_wsc <- left_join(
+  sites %>%
+  select(site),
+  wsc %>% mutate(stream_crossing_id = as.character(stream_crossing_id)) %>% select(stream_crossing_id, watershed_code_50k_parsed),
+  by = c('site' = 'stream_crossing_id')
+)
+
+
+#burn to a csv so we can cut and paste into the submission form
+ids_wsc %>% readr::write_csv(file = paste0(dirname(getwd()), '/data/raw_input/wsc.csv'), na = '')
+
+```
+
+
+
+
